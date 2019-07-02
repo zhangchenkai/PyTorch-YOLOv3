@@ -1,0 +1,5 @@
+classes= 15
+train  = train_supervised
+valid  = test
+names  = data/fabric.names
+backup = saved_models/

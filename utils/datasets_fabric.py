@@ -1,6 +1,7 @@
 import glob
-import os
 import random
+import xml.etree.cElementTree as ET
+from os import path
 
 import numpy as np
 import torch
@@ -56,31 +57,45 @@ class ImageFolder(Dataset):
         return len(self.files)
 
 
-class ListDataset(Dataset):
-    def __init__(self, list_path, img_size=416, augment=True, multiscale=True, normalized_labels=True):
-        with open(list_path, "r") as file:
-            self.img_files = file.readlines()
+def convert(size, box):
+    dw = 1. / size[0]
+    dh = 1. / size[1]
+    x = (box[0] + box[1]) / 2.0
+    y = (box[2] + box[3]) / 2.0
+    w = box[1] - box[0]
+    h = box[3] - box[2]
+    x = x * dw
+    w = w * dw
+    y = y * dh
+    h = h * dh
+    return (x, y, w, h)
 
-        self.label_files = [
-            path.replace("images", "labels").replace(".png", ".txt").replace(".jpg", ".txt")
-            for path in self.img_files
-        ]
+
+class ListDataset(Dataset):
+    def __init__(self, image_set, img_size=416, augment=True, multiscale=True,
+                 binary_class=False,
+                 dataset_dir='/home/nico/Dataset/Fabric-Final/'):
+
+        with open(path.join(dataset_dir, 'ImageSets', 'All', image_set + '.txt'), "r") as file:
+            self.image_ids = file.read().splitlines()
+
         self.img_size = img_size
         self.max_objects = 100
         self.augment = augment
         self.multiscale = multiscale
-        self.normalized_labels = normalized_labels
         self.min_size = self.img_size - 3 * 32
         self.max_size = self.img_size + 3 * 32
         self.batch_count = 0
+
+        self.binary_class = binary_class
+        self.dataset_dir = dataset_dir
 
     def __getitem__(self, index):
 
         # ---------
         #  Image
         # ---------
-
-        img_path = self.img_files[index % len(self.img_files)].rstrip()
+        img_path = path.join(self.dataset_dir, 'Images', self.image_ids[index] + '.jpg')
 
         # Extract image as PyTorch tensor
         img = transforms.ToTensor()(Image.open(img_path).convert('RGB'))
@@ -91,7 +106,6 @@ class ListDataset(Dataset):
             img = img.expand((3, img.shape[1:]))
 
         _, h, w = img.shape
-        h_factor, w_factor = (h, w) if self.normalized_labels else (1, 1)
         # Pad to square resolution
         img, pad = pad_to_square(img, 0)
         _, padded_h, padded_w = img.shape
@@ -99,30 +113,36 @@ class ListDataset(Dataset):
         # ---------
         #  Label
         # ---------
+        xml_path = path.join(self.dataset_dir, 'Annotations', 'xmls', self.image_ids[index] + '.xml')
 
-        label_path = self.label_files[index % len(self.img_files)].rstrip()
-
-        targets = None
-        if os.path.exists(label_path):
-            boxes = torch.from_numpy(np.loadtxt(label_path).reshape(-1, 5))
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        boxes = []
+        for xmlbox in root.iter('bbox'):
+            if self.binary_class:
+                cls_idx = 0  # index start from 0
+            else:
+                cls_idx = int(root.find('pattern').text) - 1  # index start from 0
             # Extract coordinates for unpadded + unscaled image
-            x1 = w_factor * (boxes[:, 1] - boxes[:, 3] / 2)
-            y1 = h_factor * (boxes[:, 2] - boxes[:, 4] / 2)
-            x2 = w_factor * (boxes[:, 1] + boxes[:, 3] / 2)
-            y2 = h_factor * (boxes[:, 2] + boxes[:, 4] / 2)
+            x1 = float(xmlbox.find('xmin').text)
+            x2 = float(xmlbox.find('xmax').text)
+            y1 = float(xmlbox.find('ymin').text)
+            y2 = float(xmlbox.find('ymax').text)
             # Adjust for added padding
             x1 += pad[0]
             y1 += pad[2]
             x2 += pad[1]
             y2 += pad[3]
             # Returns (x, y, w, h)
-            boxes[:, 1] = ((x1 + x2) / 2) / padded_w
-            boxes[:, 2] = ((y1 + y2) / 2) / padded_h
-            boxes[:, 3] *= w_factor / padded_w
-            boxes[:, 4] *= h_factor / padded_h
-
-            targets = torch.zeros((len(boxes), 6))
-            targets[:, 1:] = boxes
+            x = ((x1 + x2) / 2) / padded_w
+            y = ((y1 + y2) / 2) / padded_h
+            w = (x2 - x1) / padded_w
+            h = (y2 - y1) / padded_h
+            box = (cls_idx, x, y, w, h)
+            boxes.append(box)
+        boxes = torch.from_numpy(np.array(boxes, dtype=np.float32).reshape(-1, 5))
+        targets = torch.zeros((len(boxes), 6))
+        targets[:, 1:] = boxes
 
         # Apply augmentations
         if self.augment:
@@ -148,4 +168,4 @@ class ListDataset(Dataset):
         return paths, imgs, targets
 
     def __len__(self):
-        return len(self.img_files)
+        return len(self.image_ids)

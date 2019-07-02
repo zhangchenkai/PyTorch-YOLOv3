@@ -1,16 +1,12 @@
 from __future__ import division
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
 
 from utils.parse_config import *
-from utils.utils import build_targets, to_cpu, non_max_suppression
-
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from utils.utils import build_targets, to_cpu
 
 
 def create_modules(module_defs):
@@ -76,6 +72,14 @@ def create_modules(module_defs):
             # Define detection layer
             yolo_layer = YOLOLayer(anchors, num_classes, img_size)
             modules.add_module(f"yolo_{module_i}", yolo_layer)
+
+        elif module_def['type'] == 'reorg':
+            stride = int(module_def['stride'])
+            prev_filters = stride * stride * prev_filters
+            modules.add_module(f"reorg_{module_i}", Reorg(stride))
+        elif module_def['type'] == 'region':
+            pass
+
         # Register module list and number of output filters
         module_list.append(modules)
         output_filters.append(filters)
@@ -93,6 +97,29 @@ class Upsample(nn.Module):
 
     def forward(self, x):
         x = F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode)
+        return x
+
+
+class Reorg(nn.Module):
+    def __init__(self, stride=2):
+        super(Reorg, self).__init__()
+        self.stride = stride
+
+    def forward(self, x):
+        stride = self.stride
+        assert (x.data.dim() == 4)
+        B = x.data.size(0)
+        C = x.data.size(1)
+        H = x.data.size(2)
+        W = x.data.size(3)
+        assert (H % stride == 0)
+        assert (W % stride == 0)
+        ws = stride
+        hs = stride
+        x = x.view(B, C, H // hs, hs, W // ws, ws).transpose(3, 4).contiguous()
+        x = x.view(B, C, H // hs * W // ws, hs * ws).transpose(2, 3).contiguous()
+        x = x.view(B, C, hs * ws, H // hs, W // ws).transpose(1, 2).contiguous()
+        x = x.view(B, hs * ws * C, H // hs, W // ws)
         return x
 
 
@@ -145,8 +172,8 @@ class YOLOLayer(nn.Module):
 
         prediction = (
             x.view(num_samples, self.num_anchors, self.num_classes + 5, grid_size, grid_size)
-            .permute(0, 1, 3, 4, 2)
-            .contiguous()
+                .permute(0, 1, 3, 4, 2)
+                .contiguous()
         )
 
         # Get outputs
@@ -289,30 +316,30 @@ class Darknet(nn.Module):
                     bn_layer = module[1]
                     num_b = bn_layer.bias.numel()  # Number of biases
                     # Bias
-                    bn_b = torch.from_numpy(weights[ptr : ptr + num_b]).view_as(bn_layer.bias)
+                    bn_b = torch.from_numpy(weights[ptr: ptr + num_b]).view_as(bn_layer.bias)
                     bn_layer.bias.data.copy_(bn_b)
                     ptr += num_b
                     # Weight
-                    bn_w = torch.from_numpy(weights[ptr : ptr + num_b]).view_as(bn_layer.weight)
+                    bn_w = torch.from_numpy(weights[ptr: ptr + num_b]).view_as(bn_layer.weight)
                     bn_layer.weight.data.copy_(bn_w)
                     ptr += num_b
                     # Running Mean
-                    bn_rm = torch.from_numpy(weights[ptr : ptr + num_b]).view_as(bn_layer.running_mean)
+                    bn_rm = torch.from_numpy(weights[ptr: ptr + num_b]).view_as(bn_layer.running_mean)
                     bn_layer.running_mean.data.copy_(bn_rm)
                     ptr += num_b
                     # Running Var
-                    bn_rv = torch.from_numpy(weights[ptr : ptr + num_b]).view_as(bn_layer.running_var)
+                    bn_rv = torch.from_numpy(weights[ptr: ptr + num_b]).view_as(bn_layer.running_var)
                     bn_layer.running_var.data.copy_(bn_rv)
                     ptr += num_b
                 else:
                     # Load conv. bias
                     num_b = conv_layer.bias.numel()
-                    conv_b = torch.from_numpy(weights[ptr : ptr + num_b]).view_as(conv_layer.bias)
+                    conv_b = torch.from_numpy(weights[ptr: ptr + num_b]).view_as(conv_layer.bias)
                     conv_layer.bias.data.copy_(conv_b)
                     ptr += num_b
                 # Load conv. weights
                 num_w = conv_layer.weight.numel()
-                conv_w = torch.from_numpy(weights[ptr : ptr + num_w]).view_as(conv_layer.weight)
+                conv_w = torch.from_numpy(weights[ptr: ptr + num_w]).view_as(conv_layer.weight)
                 conv_layer.weight.data.copy_(conv_w)
                 ptr += num_w
 
