@@ -2,6 +2,7 @@ from __future__ import division
 
 import argparse
 
+from terminaltables import AsciiTable
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
@@ -12,17 +13,16 @@ from utils.parse_config import *
 from utils.utils import *
 
 
-def evaluate(model, path, iou_thres, conf_thres, nms_thres, img_size, batch_size, binary_class):
+def evaluate(model, path, iou_thres, conf_thres, nms_thres, img_size, batch_size, n_cpu, binary_class):
     model.eval()
 
     # Get dataloader
     dataset = ListDataset(path, img_size=img_size, augment=False, multiscale=False, binary_class=binary_class)
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=1, collate_fn=dataset.collate_fn
+        dataset, batch_size=batch_size, shuffle=False, num_workers=n_cpu, collate_fn=dataset.collate_fn
     )
 
     Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
-    print(Tensor)
 
     labels = []
     sample_metrics = []  # List of tuples (TP, confs, pred)
@@ -55,9 +55,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_config", type=str, default="config/fabric.data", help="path to data config file")
     parser.add_argument("--weights_path", type=str, default="weights/yolov3.weights", help="path to weights file")
     parser.add_argument("--iou_thres", type=float, default=0.5, help="iou threshold required to qualify as detected")
-    parser.add_argument("--conf_thres", type=float, default=0.001, help="object confidence threshold")
+    parser.add_argument("--conf_thres", type=float, default=0.5, help="object confidence threshold")
     parser.add_argument("--nms_thres", type=float, default=0.5, help="iou thresshold for non-maximum suppression")
-    parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
+    parser.add_argument("--n_cpu", type=int, default=4, help="number of cpu threads to use during batch generation")
     parser.add_argument("--img_size", type=int, default=416, help="size of each image dimension")
 
     parser.add_argument("--binary_class", default=False, action='store_true', help='whether use binary class label of dataset')
@@ -80,8 +80,8 @@ if __name__ == "__main__":
         # Load checkpoint weights
         model.load_state_dict(torch.load(opt.weights_path))
 
-    print("Compute mAP...")
-
+    print("\n---- Evaluating Model ----")
+    # Evaluate the model on the validation set
     precision, recall, AP, f1, ap_class = evaluate(
         model,
         path=valid_path,
@@ -91,11 +91,20 @@ if __name__ == "__main__":
         img_size=opt.img_size,
         batch_size=8,
 
+        n_cpu=opt.n_cpu,
         binary_class=opt.binary_class,
     )
 
-    print("Average Precisions:")
-    for i, c in enumerate(ap_class):
-        print(f"+ Class '{c}' ({class_names[c]}) - AP: {AP[i]}")
+    evaluation_metrics = [
+        ("val_precision", precision.mean()),
+        ("val_recall", recall.mean()),
+        ("val_mAP", AP.mean()),
+        ("val_f1", f1.mean()),
+    ]
 
-    print(f"mAP: {AP.mean()}")
+    # Print class APs and mAP
+    ap_table = [["Index", "Class name", "AP@%g" % opt.iou_thres]]
+    for i, c in enumerate(ap_class):
+        ap_table += [[c, class_names[c], "%.5f" % AP[i]]]
+    print(AsciiTable(ap_table).table)
+    print(f"---- mAP {AP.mean()}")
